@@ -1,5 +1,6 @@
 import makeWASocket, {
   DisconnectReason,
+  fetchLatestWaWebVersion,
   useMultiFileAuthState,
   type WASocket,
   type ConnectionState,
@@ -15,6 +16,42 @@ export interface SessionState {
   qrCode?: string;
   phoneNumber?: string;
   lastError?: string;
+}
+
+const FALLBACK_WA_VERSION: [number, number, number] = [2, 3000, 1045340097];
+const VERSION_TIMEOUT_MS = 5000;
+
+function isValidWaVersion(v: unknown): v is [number, number, number] {
+  return (
+    Array.isArray(v) &&
+    v.length === 3 &&
+    v.every(n => typeof n === 'number' && Number.isInteger(n) && n >= 0)
+  );
+}
+
+async function resolveWaVersion(logger: pino.Logger): Promise<[number, number, number]> {
+  const raw = process.env.BAILEYS_WA_VERSION?.trim();
+  if (raw) {
+    const parts = raw.split(/[.,]/).map(s => parseInt(s, 10));
+    if (parts.length === 3 && isValidWaVersion(parts) && parts[0] === 2 && parts[1] >= 2000) {
+      return parts;
+    }
+    logger.warn(`Invalid BAILEYS_WA_VERSION "${raw}"; ignoring`);
+  }
+
+  try {
+    const result = await fetchLatestWaWebVersion({
+      signal: AbortSignal.timeout(VERSION_TIMEOUT_MS),
+    } as RequestInit);
+    if (result?.isLatest === true && isValidWaVersion(result.version)) {
+      return result.version;
+    }
+    logger.warn(`fetchLatestWaWebVersion returned isLatest=false; using fallback`);
+  } catch (err) {
+    logger.warn(`fetchLatestWaWebVersion failed: ${String(err)}; using fallback`);
+  }
+
+  return FALLBACK_WA_VERSION;
 }
 
 export class SocketManager {
@@ -59,9 +96,13 @@ export class SocketManager {
     };
     this.sessions.set(sessionId, sessionState);
 
+    const version = await resolveWaVersion(this.logger);
+    this.logger.info(`Using WhatsApp Web version ${version.join('.')}`);
+
     const sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
+      version,
       logger: this.logger.child({ session: sessionId }) as any,
     });
 
